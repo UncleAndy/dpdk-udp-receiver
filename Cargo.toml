@@ -1,0 +1,13 @@
+[package]
+name = "dpdk-udp-receiver"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+
+[build-dependencies]
+# Этот крейт автоматически сгенерирует привязки ровно под ваш системный DPDK
+bindgen = "0"
+pkg-config = "0"
+cc = "1.0"
