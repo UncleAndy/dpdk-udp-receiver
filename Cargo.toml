@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
-smoltcp = { version = "0.13", default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp"] }
+smoltcp = { version = "0.13", default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-icmp", "socket-udp", "auto-icmp-echo-reply"] }
 
 [build-dependencies]
 # Этот крейт автоматически сгенерирует привязки ровно под ваш системный DPDK

@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use smoltcp::iface::{Config, Interface, SocketSet, SocketStorage};
 use smoltcp::socket::udp::{PacketBuffer as UdpPacketBuffer, PacketMetadata, Socket as UdpSocket};
-use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
+use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address};
 use smoltcp::time::Instant;
 
 mod dpdk_safe;
@@ -25,6 +25,8 @@ fn main() -> Result<()> {
         ip_addrs.push(device_ip).unwrap();
     });
 
+    iface.routes_mut().add_default_ipv4_route(Ipv4Address::new(192, 168, 100, 1)).unwrap();
+
     // Создаем UDP сокет
     let mut udp_rx_meta = [PacketMetadata::EMPTY; 16];
     let mut udp_rx_data = [0u8; 65535];
@@ -34,7 +36,7 @@ fn main() -> Result<()> {
     let udp_tx_buffer = UdpPacketBuffer::new(&mut udp_tx_meta[..], &mut udp_tx_data[..]);
     let mut udp_socket = UdpSocket::new(udp_rx_buffer, udp_tx_buffer);
     
-    // Слушаем на всех адресах, порт 1234
+    // Слушаем на всех адресах, порт 9999
     udp_socket.bind(9999).unwrap();
 
     let mut socket_storage = [SocketStorage::EMPTY; 8];
