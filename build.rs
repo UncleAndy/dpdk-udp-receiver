@@ -42,6 +42,7 @@ fn main() {
         .allowlist_function("wrap_rte_eth_rx_burst")
         .allowlist_function("wrap_rte_pktmbuf_free_seg")
         .allowlist_function("wrap_rte_eth_tx_burst")
+        .allowlist_function("wrap_rte_pktmbuf_alloc")
         .allowlist_function("rte_eth_macaddr_get")
         .allowlist_var("RTE_MBUF_DEFAULT_BUF_SIZE")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))

@@ -2,6 +2,9 @@
 
 use std::ffi::CString;
 use std::ptr;
+use std::collections::VecDeque;
+use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
+use smoltcp::time::Instant;
 
 // Переносим генерацию биндингов строго сюда
 mod dpdk {
@@ -16,11 +19,14 @@ pub struct Mempool {
 // Безопасная обертка над сетевым портом
 pub struct DpdkPort {
     id: u16,
+    rx_queue: VecDeque<PacketBuffer>,
+    mempool: *mut dpdk::rte_mempool,
 }
 
 // Безопасная обертка над пакетом буфера
 pub struct PacketBuffer {
     raw: *mut dpdk::rte_mbuf,
+    mempool: *mut dpdk::rte_mempool,
 }
 
 impl DpdkPort {
@@ -46,6 +52,7 @@ impl DpdkPort {
             if raw_pool.is_null() {
                 return Err("Ошибка создания Mempool".to_string());
             }
+            let mempool_ptr = raw_pool;
             let mempool = Mempool { raw: raw_pool };
 
             let port_id = 0u16;
@@ -56,7 +63,7 @@ impl DpdkPort {
             if dpdk::rte_eth_tx_queue_setup(port_id, 0, 1024, 0, ptr::null()) < 0 { return Err("Ошибка TX".to_string()); }
             if dpdk::rte_eth_dev_start(port_id) < 0 { return Err("Ошибка Start".to_string()); }
 
-            Ok((DpdkPort { id: port_id }, mempool))
+            Ok((DpdkPort { id: port_id, rx_queue: VecDeque::new(), mempool: raw_pool }, mempool))
         }
     }
 
@@ -64,10 +71,11 @@ impl DpdkPort {
         let mut raw_mbufs: Vec<*mut dpdk::rte_mbuf> = vec![ptr::null_mut(); max_packets];
         unsafe {
             let nb_rx = dpdk::wrap_rte_eth_rx_burst(self.id, 0, raw_mbufs.as_mut_ptr(), max_packets as u16);
+            
             raw_mbufs.into_iter()
                 .take(nb_rx as usize)
                 .filter(|ptr| !ptr.is_null())
-                .map(|ptr| PacketBuffer { raw: ptr })
+                .map(|ptr| PacketBuffer { raw: ptr, mempool: self.mempool })
                 .collect()
         }
     }
@@ -83,6 +91,76 @@ impl DpdkPort {
             } else {
                 false
             }
+        }
+    }
+}
+
+impl Device for DpdkPort {
+    type RxToken<'a> = DpdkRxToken;
+    type TxToken<'a> = DpdkTxToken<'a>;
+
+    fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        if self.rx_queue.is_empty() {
+            let packets = self.rx_burst(32);
+            self.rx_queue.extend(packets);
+        }
+
+        self.rx_queue.pop_front().map(|packet| {
+            let rx = DpdkRxToken { packet };
+            let tx = DpdkTxToken { port: self };
+            (rx, tx)
+        })
+    }
+
+    fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
+        Some(DpdkTxToken { port: self })
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        let mut caps = DeviceCapabilities::default();
+        caps.max_transmission_unit = 1500;
+        caps.medium = Medium::Ethernet;
+        caps.max_burst_size = Some(32);
+        caps
+    }
+}
+
+pub struct DpdkRxToken {
+    packet: PacketBuffer,
+}
+
+impl phy::RxToken for DpdkRxToken {
+    fn consume<R, F>(mut self, f: F) -> R
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        f(self.packet.as_slice())
+    }
+}
+
+pub struct DpdkTxToken<'a> {
+    port: &'a DpdkPort,
+}
+
+impl<'a> phy::TxToken for DpdkTxToken<'a> {
+    fn consume<R, F>(self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        unsafe {
+            let raw_mbuf = dpdk::wrap_rte_pktmbuf_alloc(self.port.mempool);
+            if raw_mbuf.is_null() {
+                panic!("Failed to allocate mbuf for transmission");
+            }
+
+            let mut packet = PacketBuffer { raw: raw_mbuf, mempool: self.port.mempool };
+            // Устанавливаем длину данных
+            (*packet.raw).data_len = len as u16;
+            (*packet.raw).pkt_len = len as u32;
+
+            let result = f(packet.as_mut_slice());
+            self.port.tx_send(packet);
+            result
         }
     }
 }

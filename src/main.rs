@@ -1,4 +1,8 @@
 use anyhow::{Result, anyhow};
+use smoltcp::iface::{Config, Interface, SocketSet, SocketStorage};
+use smoltcp::socket::udp::{PacketBuffer as UdpPacketBuffer, PacketMetadata, Socket as UdpSocket};
+use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
+use smoltcp::time::Instant;
 
 mod dpdk_safe;
 use dpdk_safe::DpdkPort;
@@ -6,67 +10,53 @@ use dpdk_safe::DpdkPort;
 fn main() -> Result<()> {
     let my_mac: [u8; 6] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
     let my_ip: [u8; 4] = [192, 168, 100, 99];
+    let device_mac = EthernetAddress(my_mac);
+    let device_ip = IpCidr::new(IpAddress::v4(my_ip[0], my_ip[1], my_ip[2], my_ip[3]), 24);
 
     // Инициализируем порт через безопасную абстракцию
-    let (port, _mempool) = DpdkPort::init_vdev("dpdk-tap0", "0-1", my_ip)
+    let (mut port, _mempool) = DpdkPort::init_vdev("dpdk-tap0", "0-1", my_ip)
         .map_err(|e| anyhow!(e))?;
 
-    println!("Успех! Локальный DPDK на 100% безопасном Rust запущен.");
+    let mut config = Config::new(device_mac.into());
+    config.random_seed = 0x12345678;
+
+    let mut iface = Interface::new(config, &mut port, Instant::from_millis(0));
+    iface.update_ip_addrs(|ip_addrs| {
+        ip_addrs.push(device_ip).unwrap();
+    });
+
+    // Создаем UDP сокет
+    let mut udp_rx_meta = [PacketMetadata::EMPTY; 16];
+    let mut udp_rx_data = [0u8; 65535];
+    let mut udp_tx_meta = [PacketMetadata::EMPTY; 16];
+    let mut udp_tx_data = [0u8; 65535];
+    let udp_rx_buffer = UdpPacketBuffer::new(&mut udp_rx_meta[..], &mut udp_rx_data[..]);
+    let udp_tx_buffer = UdpPacketBuffer::new(&mut udp_tx_meta[..], &mut udp_tx_data[..]);
+    let mut udp_socket = UdpSocket::new(udp_rx_buffer, udp_tx_buffer);
+    
+    // Слушаем на всех адресах, порт 1234
+    udp_socket.bind(9999).unwrap();
+
+    let mut socket_storage = [SocketStorage::EMPTY; 8];
+    let mut sockets = SocketSet::new(&mut socket_storage[..]);
+    let udp_handle = sockets.add(udp_socket);
+
+    println!("Успех! Локальный DPDK с использованием smoltcp запущен.");
     println!("Слушаю интерфейс dpdk-tap0... Нажмите Ctrl+C для выхода.");
 
+    let start_time = std::time::Instant::now();
+
     loop {
-        let packets = port.rx_burst(32);
+        let now = std::time::Instant::now();
+        let timestamp = Instant::from_millis((now - start_time).as_millis() as i64);
+        
+        iface.poll(timestamp, &mut port, &mut sockets);
 
-        for mut packet in packets {
-            let data_len = packet.as_slice().len();
-
-            if data_len >= 42 {
-                let packet_slice = packet.as_slice();
-
-                // Ethernet заголовок: тип протокола на смещении 12 и 13
-                let eth_type = u16::from_be_bytes([packet_slice[12], packet_slice[13]]);
-
-                // 1. ОБРАБОТКА UDP (EtherType = 0x0800, Номер протокола IP на смещении 23 = 17)
-                if eth_type == 0x0800 && packet_slice[23] == 17 {
-                    // UDP порты начинаются на смещении 34 и 36
-                    let src_port = u16::from_be_bytes([packet_slice[34], packet_slice[35]]);
-                    let dst_port = u16::from_be_bytes([packet_slice[36], packet_slice[37]]);
-                    println!(" Пойман UDP Пакет! Порты: {} -> {}. Размер: {} байт", src_port, dst_port, data_len);
-
-                    if data_len > 42 {
-                        let payload = &packet_slice[42..];
-                        if let Ok(text) = std::str::from_utf8(payload) {
-                            println!("   Текст: \"{}\"", text.trim());
-                        }
-                    }
-                    continue;
-                }
-
-                // 2. ОБРАБОТКА ARP (EtherType = 0x0806)
-                if eth_type == 0x0806 {
-                    // Код операции ARP на смещении 20 и 21
-                    let arp_op = u16::from_be_bytes([packet_slice[20], packet_slice[21]]);
-                    let target_ip = &packet_slice[38..42];
-
-                    if arp_op == 1 && target_ip == my_ip {
-                        println!(" Получен ARP-запрос к 192.168.100.99. Отвечаем...");
-
-                        let sender_mac: [u8; 6] = packet_slice[22..28].try_into().unwrap();
-                        let sender_ip: [u8; 4] = packet_slice[28..32].try_into().unwrap();
-
-                        let mut_slice = packet.as_mut_slice();
-                        mut_slice[0..6].copy_from_slice(&sender_mac);
-                        mut_slice[6..12].copy_from_slice(&my_mac);
-                        mut_slice[20..22].copy_from_slice(&2u16.to_be_bytes());
-                        mut_slice[22..28].copy_from_slice(&my_mac);
-                        mut_slice[28..32].copy_from_slice(&my_ip);
-                        mut_slice[32..38].copy_from_slice(&sender_mac);
-                        mut_slice[38..42].copy_from_slice(&sender_ip);
-
-                        port.tx_send(packet);
-                        continue;
-                    }
-                }
+        let socket = sockets.get_mut::<UdpSocket>(udp_handle);
+        if let Ok((data, endpoint)) = socket.recv() {
+            println!(" Пойман UDP Пакет! От: {}. Размер: {} байт", endpoint, data.len());
+            if let Ok(text) = std::str::from_utf8(data) {
+                println!("   Текст: \"{}\"", text.trim());
             }
         }
     }

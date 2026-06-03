@@ -16,3 +16,7 @@ void wrap_rte_pktmbuf_free_seg(struct rte_mbuf *m) {
 uint16_t wrap_rte_eth_tx_burst(uint16_t port_id, uint16_t queue_id, struct rte_mbuf **tx_pkts, uint16_t nb_pkts) {
     return rte_eth_tx_burst(port_id, queue_id, tx_pkts, nb_pkts);
 }
+
+struct rte_mbuf *wrap_rte_pktmbuf_alloc(struct rte_mempool *mp) {
+    return rte_pktmbuf_alloc(mp);
+}
